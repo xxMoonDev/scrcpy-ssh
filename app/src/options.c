@@ -48,6 +48,7 @@ const struct scrcpy_options scrcpy_options_default = {
         .last = DEFAULT_LOCAL_PORT_RANGE_LAST,
     },
     .tunnel_host = 0,
+    .ssh = NULL,
     .tunnel_port = 0,
     .shortcut_mods = SC_SHORTCUT_MOD_LALT | SC_SHORTCUT_MOD_LSUPER,
     .min_size_alignment = 1,

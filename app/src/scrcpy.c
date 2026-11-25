@@ -439,6 +439,7 @@ scrcpy(struct scrcpy_options *options) {
         .crop = options->crop,
         .port_range = options->port_range,
         .tunnel_host = options->tunnel_host,
+        .ssh = options->ssh,
         .tunnel_port = options->tunnel_port,
         .min_size_alignment = options->min_size_alignment,
         .max_size = options->max_size,

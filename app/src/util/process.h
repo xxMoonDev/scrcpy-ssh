@@ -133,6 +133,20 @@ ssize_t
 sc_pipe_read_all(sc_pipe pipe, char *data, size_t len);
 
 /**
+ * Write to the pipe
+ *
+ * Same semantic as write().
+ */
+ssize_t
+sc_pipe_write(sc_pipe pipe, const char *data, size_t len);
+
+/**
+ * Write exactly `len` chars to a pipe (unless error)
+ */
+ssize_t
+sc_pipe_write_all(sc_pipe pipe, const char *data, size_t len);
+
+/**
  * Close the pipe
  */
 void

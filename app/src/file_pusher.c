@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "adb/adb.h"
+#include "ssh/ssh.h"
 #include "control_msg.h"
 #include "controller.h"
 #include "util/log.h"
@@ -159,7 +160,17 @@ run_file_pusher(void *data) {
 
         if (req.action == SC_FILE_PUSHER_ACTION_INSTALL_APK) {
             LOGI("Installing %s...", req.file);
-            bool ok = sc_adb_install(intr, serial, req.file, 0);
+            bool ok;
+            if (sc_ssh_is_serial(serial)) {
+                struct sc_ssh_target t;
+                ok = sc_ssh_target_parse(&t, serial);
+                if (ok) {
+                    ok = sc_ssh_install(intr, &t, req.file);
+                    sc_ssh_target_destroy(&t);
+                }
+            } else {
+                ok = sc_adb_install(intr, serial, req.file, 0);
+            }
             if (ok) {
                 LOGI("%s successfully installed", req.file);
             } else {
@@ -167,7 +178,31 @@ run_file_pusher(void *data) {
             }
         } else {
             LOGI("Pushing %s...", req.file);
-            bool ok = sc_adb_push(intr, serial, req.file, push_target, 0);
+            bool ok;
+            if (sc_ssh_is_serial(serial)) {
+                // like adb push: target is a directory, keep the file name
+                const char *name = strrchr(req.file, '/');
+                const char *name2 = strrchr(req.file, '\\');
+                if (!name || (name2 && name2 > name)) {
+                    name = name2;
+                }
+                name = name ? name + 1 : req.file;
+                char *dst;
+                struct sc_ssh_target t;
+                ok = asprintf(&dst, "%s%s%s", push_target,
+                              push_target[strlen(push_target) - 1] == '/'
+                                  ? "" : "/", name) != -1;
+                if (ok) {
+                    ok = sc_ssh_target_parse(&t, serial);
+                    if (ok) {
+                        ok = sc_ssh_push(intr, &t, req.file, dst);
+                        sc_ssh_target_destroy(&t);
+                    }
+                    free(dst);
+                }
+            } else {
+                ok = sc_adb_push(intr, serial, req.file, push_target, 0);
+            }
             if (ok) {
                 LOGI("%s successfully pushed to %s", req.file, push_target);
                 request_scan_file(fp); // any error already logged

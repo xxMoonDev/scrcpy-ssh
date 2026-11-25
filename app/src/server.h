@@ -7,6 +7,8 @@
 #include <stdint.h>
 
 #include "adb/adb_tunnel.h"
+#include "ssh/ssh.h"
+#include "ssh/ssh_tunnel.h"
 #include "options.h"
 #include "util/intr.h"
 #include "util/net.h"
@@ -21,6 +23,7 @@ struct sc_server_info {
 struct sc_server_params {
     uint32_t scid;
     const char *req_serial;
+    const char *ssh; // [user@]host[:port], NULL for adb
     enum sc_log_level log_level;
     enum sc_codec video_codec;
     enum sc_codec audio_codec;
@@ -94,6 +97,14 @@ struct sc_server {
 
     struct sc_intr intr;
     struct sc_adb_tunnel tunnel;
+
+    bool ssh;
+    struct sc_ssh_target ssh_target;
+    struct sc_ssh_tunnel ssh_tunnel;
+    // stdin of the ssh process running the server; while it stays open the
+    // remote watchdog keeps the server alive (EOF => server is killed)
+    sc_pipe ssh_server_stdin;
+    bool has_ssh_server_stdin;
 
     sc_socket video_socket;
     sc_socket audio_socket;

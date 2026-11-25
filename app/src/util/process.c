@@ -22,6 +22,21 @@ sc_pipe_read_all(sc_pipe pipe, char *data, size_t len) {
     return copied;
 }
 
+ssize_t
+sc_pipe_write_all(sc_pipe pipe, const char *data, size_t len) {
+    size_t written = 0;
+    while (len > 0) {
+        ssize_t w = sc_pipe_write(pipe, data, len);
+        if (w <= 0) {
+            return written ? (ssize_t) written : w;
+        }
+        len -= w;
+        data += w;
+        written += w;
+    }
+    return written;
+}
+
 static int
 run_observer(void *data) {
     struct sc_process_observer *observer = data;

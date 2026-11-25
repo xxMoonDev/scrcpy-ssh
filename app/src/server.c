@@ -8,6 +8,8 @@
 #include <sys/types.h>
 
 #include "adb/adb.h"
+#include "ssh/ssh.h"
+#include "ssh/ssh_tunnel.h"
 #include "util/env.h"
 #include "util/file.h"
 #include "util/log.h"
@@ -51,6 +53,73 @@ get_server_path(void) {
 #endif
 
     return server_path;
+}
+
+static bool
+sc_server_sleep(struct sc_server *server, sc_tick deadline);
+
+static char *
+get_ssh_relay_path(void) {
+    char *path = sc_get_env("SCRCPY_SSH_RELAY_PATH");
+    if (path) {
+        return path;
+    }
+#ifndef PORTABLE
+    path = strdup(PREFIX "/share/scrcpy/" SC_SSH_RELAY_FILENAME);
+#else
+    path = sc_file_get_local_path(SC_SSH_RELAY_FILENAME);
+    if (!path) {
+        path = strdup(SC_SSH_RELAY_FILENAME);
+    }
+#endif
+    if (!path) {
+        LOG_OOM();
+    }
+    return path;
+}
+
+static bool
+push_server_ssh(struct sc_server *server) {
+    char *server_path = get_server_path();
+    if (!server_path) {
+        return false;
+    }
+    char *relay_path = get_ssh_relay_path();
+    if (!relay_path) {
+        free(server_path);
+        return false;
+    }
+    bool ok = false;
+    if (!sc_file_is_regular(server_path)) {
+        LOGE("'%s' does not exist or is not a regular file", server_path);
+    } else if (!sc_file_is_regular(relay_path)) {
+        LOGE("'%s' does not exist or is not a regular file", relay_path);
+    } else {
+        // A transient SSH failure (dropped connection, busy server) should not
+        // abort the whole session: retry each copy a few times
+        const char *const locals[] = {server_path, relay_path};
+        const char *const remotes[] = {SC_DEVICE_SERVER_PATH,
+                                       SC_SSH_DEVICE_RELAY_PATH};
+        ok = true;
+        for (unsigned i = 0; ok && i < 2; ++i) {
+            ok = false;
+            for (unsigned attempt = 1; !ok && attempt <= 3; ++attempt) {
+                if (attempt > 1) {
+                    LOGW("Retrying ssh push of %s (attempt %u/3)...", locals[i],
+                         attempt);
+                    if (!sc_server_sleep(server,
+                                         sc_tick_now() + SC_TICK_FROM_MS(500))) {
+                        break; // stopped
+                    }
+                }
+                ok = sc_ssh_push(&server->intr, &server->ssh_target, locals[i],
+                                 remotes[i]);
+            }
+        }
+    }
+    free(server_path);
+    free(relay_path);
+    return ok;
 }
 
 static bool
@@ -215,10 +284,12 @@ execute_server(struct sc_server *server,
 
     const char *cmd[128];
     unsigned count = 0;
-    cmd[count++] = sc_adb_get_executable();
-    cmd[count++] = "-s";
-    cmd[count++] = serial;
-    cmd[count++] = "shell";
+    if (!server->ssh) {
+        cmd[count++] = sc_adb_get_executable();
+        cmd[count++] = "-s";
+        cmd[count++] = serial;
+        cmd[count++] = "shell";
+    }
     cmd[count++] = "CLASSPATH=" SC_DEVICE_SERVER_PATH;
     cmd[count++] = "app_process";
 
@@ -458,7 +529,9 @@ execute_server(struct sc_server *server,
 
 #undef ADD_PARAM
 
-    cmd[count++] = NULL;
+    if (!server->ssh) {
+        cmd[count++] = NULL;
+    }
 
 #ifdef SERVER_DEBUGGER
     LOGI("Server debugger listening%s...",
@@ -476,7 +549,40 @@ execute_server(struct sc_server *server,
     // Then click on "Debug"
 #endif
     // Inherit both stdout and stderr (all server logs are printed to stdout)
-    pid = sc_adb_execute(cmd, 0);
+    if (server->ssh) {
+        // The SSH server may not kill the remote process tree when the channel
+        // closes, so tie the scrcpy server lifetime to the channel's stdin:
+        //   exec 3<&0; <server> & p=$!; (cat <&3 >/dev/null; kill $p) & wait $p
+        // (fd 3: background jobs of a non-interactive shell get /dev/null as
+        // stdin, so the channel's stdin must be passed explicitly)
+        static const char *const watchdog[] = {
+            "&", "p=$!;", "(cat", "<&3", ">/dev/null;", "kill", "$p",
+            "2>/dev/null)", "&", "wait", "$p",
+        };
+        const char *full[160];
+        unsigned n = 0;
+        full[n++] = "exec";
+        full[n++] = "3<&0;";
+        for (unsigned i = 0; i < count; ++i) {
+            full[n++] = cmd[i];
+        }
+        for (unsigned i = 0; i < ARRAY_LEN(watchdog); ++i) {
+            full[n++] = watchdog[i];
+        }
+        full[n] = NULL;
+        sc_pipe pin;
+        enum sc_process_result r =
+            sc_ssh_execute_p(&server->ssh_target, full, &pid, 0, &pin, NULL,
+                             NULL);
+        if (r == SC_PROCESS_SUCCESS) {
+            server->ssh_server_stdin = pin;
+            server->has_ssh_server_stdin = true;
+        } else {
+            pid = SC_PROCESS_NONE;
+        }
+    } else {
+        pid = sc_adb_execute(cmd, 0);
+    }
 
 end:
     for (unsigned i = dyn_idx; i < count; ++i) {
@@ -545,21 +651,40 @@ sc_server_init(struct sc_server *server, const struct sc_server_params *params,
     // end of the program
     server->params = *params;
 
-    bool ok = sc_adb_init();
+    server->ssh = params->ssh != NULL;
+    server->has_ssh_server_stdin = false;
+    sc_ssh_tunnel_init(&server->ssh_tunnel);
+    server->ssh_target.dest = NULL;
+    server->ssh_target.port = NULL;
+
+    bool ok;
+    if (server->ssh) {
+        ok = sc_ssh_target_parse(&server->ssh_target, params->ssh);
+    } else {
+        ok = sc_adb_init();
+    }
     if (!ok) {
         return false;
     }
 
     ok = sc_mutex_init(&server->mutex);
     if (!ok) {
-        sc_adb_destroy();
+        if (server->ssh) {
+            sc_ssh_target_destroy(&server->ssh_target);
+        } else {
+            sc_adb_destroy();
+        }
         return false;
     }
 
     ok = sc_cond_init(&server->cond_stopped);
     if (!ok) {
         sc_mutex_destroy(&server->mutex);
-        sc_adb_destroy();
+        if (server->ssh) {
+            sc_ssh_target_destroy(&server->ssh_target);
+        } else {
+            sc_adb_destroy();
+        }
         return false;
     }
 
@@ -567,7 +692,11 @@ sc_server_init(struct sc_server *server, const struct sc_server_params *params,
     if (!ok) {
         sc_cond_destroy(&server->cond_stopped);
         sc_mutex_destroy(&server->mutex);
-        sc_adb_destroy();
+        if (server->ssh) {
+            sc_ssh_target_destroy(&server->ssh_target);
+        } else {
+            sc_adb_destroy();
+        }
         return false;
     }
 
@@ -592,6 +721,16 @@ sc_server_init(struct sc_server *server, const struct sc_server_params *params,
     return true;
 }
 
+static void
+server_tunnel_close(struct sc_server *server, bool connected) {
+    if (server->ssh) {
+        sc_ssh_tunnel_close(&server->ssh_tunnel, connected);
+    } else if (server->tunnel.enabled) {
+        sc_adb_tunnel_close(&server->tunnel, &server->intr, server->serial,
+                            server->device_socket_name);
+    }
+}
+
 static bool
 device_read_info(struct sc_intr *intr, sc_socket device_socket,
                  struct sc_server_info *info) {
@@ -613,10 +752,8 @@ static bool
 sc_server_connect_to(struct sc_server *server, struct sc_server_info *info) {
     struct sc_adb_tunnel *tunnel = &server->tunnel;
 
-    assert(tunnel->enabled);
-
-    const char *serial = server->serial;
-    assert(serial);
+    assert(server->ssh ? server->ssh_tunnel.enabled : tunnel->enabled);
+    assert(server->serial);
 
     bool video = server->params.video;
     bool audio = server->params.audio;
@@ -657,7 +794,8 @@ sc_server_connect_to(struct sc_server *server, struct sc_server_info *info) {
 
         uint16_t tunnel_port = server->params.tunnel_port;
         if (!tunnel_port) {
-            tunnel_port = tunnel->local_port;
+            tunnel_port = server->ssh ? server->ssh_tunnel.local_port
+                                      : tunnel->local_port;
         }
 
         unsigned attempts = 100;
@@ -714,8 +852,7 @@ sc_server_connect_to(struct sc_server *server, struct sc_server_info *info) {
     }
 
     // we don't need the adb tunnel anymore
-    sc_adb_tunnel_close(tunnel, &server->intr, serial,
-                        server->device_socket_name);
+    server_tunnel_close(server, true);
 
     sc_socket first_socket = video ? video_socket
                            : audio ? audio_socket
@@ -756,11 +893,8 @@ fail:
         }
     }
 
-    if (tunnel->enabled) {
-        // Always leave this function with tunnel disabled
-        sc_adb_tunnel_close(tunnel, &server->intr, serial,
-                            server->device_socket_name);
-    }
+    // Always leave this function with tunnel disabled
+    server_tunnel_close(server, false);
 
     return false;
 }
@@ -954,7 +1088,7 @@ sc_server_configure_tcpip_unknown_address(struct sc_server *server,
 
 static void
 sc_server_kill_adb_if_requested(struct sc_server *server) {
-    if (server->params.kill_adb_on_close) {
+    if (server->params.kill_adb_on_close && !server->ssh) {
         LOGI("Killing adb server...");
         unsigned flags = SC_ADB_NO_STDOUT | SC_ADB_NO_STDERR | SC_ADB_NO_LOGERR;
         sc_adb_kill_server(&server->intr, flags);
@@ -967,10 +1101,21 @@ run_server(void *data) {
 
     const struct sc_server_params *params = &server->params;
 
+    bool ok;
+    if (server->ssh) {
+        LOGI("Connecting over ssh to %s...", params->ssh);
+        if (!sc_ssh_check(&server->intr, &server->ssh_target)) {
+            goto error_connection_failed;
+        }
+        server->serial = sc_ssh_target_to_serial(&server->ssh_target);
+        if (!server->serial) {
+            goto error_connection_failed;
+        }
+    } else {
     // Execute "adb start-server" before "adb devices" so that daemon starting
     // output/errors is correctly printed in the console ("adb devices" output
     // is parsed, so it is not output)
-    bool ok = sc_adb_start_server(&server->intr, 0);
+    ok = sc_adb_start_server(&server->intr, 0);
     if (!ok) {
         LOGE("Could not start adb server");
         goto error_connection_failed;
@@ -1048,11 +1193,14 @@ run_server(void *data) {
         }
     }
 
+    } // end of adb device selection
+
     const char *serial = server->serial;
     assert(serial);
     LOGD("Device serial: %s", serial);
 
-    ok = push_server(&server->intr, serial);
+    ok = server->ssh ? push_server_ssh(server)
+                     : push_server(&server->intr, serial);
     if (!ok) {
         goto error_connection_failed;
     }
@@ -1080,9 +1228,19 @@ run_server(void *data) {
     assert(r == sizeof(SC_SOCKET_NAME_PREFIX) - 1 + 8);
     assert(server->device_socket_name);
 
-    ok = sc_adb_tunnel_open(&server->tunnel, &server->intr, serial,
-                            server->device_socket_name, params->port_range,
-                            params->force_adb_forward);
+    if (server->ssh) {
+        // the device side of the ssh tunnel is always a "forward" tunnel
+        server->tunnel.forward = true;
+        unsigned expected = !!params->video + !!params->audio
+                          + !!params->control;
+        ok = sc_ssh_tunnel_open(&server->ssh_tunnel, &server->ssh_target,
+                                server->device_socket_name,
+                                params->port_range, expected);
+    } else {
+        ok = sc_adb_tunnel_open(&server->tunnel, &server->intr, serial,
+                                server->device_socket_name, params->port_range,
+                                params->force_adb_forward);
+    }
     if (!ok) {
         goto error_connection_failed;
     }
@@ -1090,8 +1248,7 @@ run_server(void *data) {
     // server will connect to our server socket
     sc_pid pid = execute_server(server, params);
     if (pid == SC_PROCESS_NONE) {
-        sc_adb_tunnel_close(&server->tunnel, &server->intr, serial,
-                            server->device_socket_name);
+        server_tunnel_close(server, false);
         goto error_connection_failed;
     }
 
@@ -1103,8 +1260,7 @@ run_server(void *data) {
     if (!ok) {
         sc_process_terminate(pid);
         sc_process_wait(pid, true); // ignore exit code
-        sc_adb_tunnel_close(&server->tunnel, &server->intr, serial,
-                            server->device_socket_name);
+        server_tunnel_close(server, false);
         goto error_connection_failed;
     }
 
@@ -1214,11 +1370,19 @@ sc_server_destroy(struct sc_server *server) {
         net_close(server->control_socket);
     }
 
+    if (server->has_ssh_server_stdin) {
+        sc_pipe_close(server->ssh_server_stdin);
+    }
+
     free(server->serial);
     free(server->device_socket_name);
     sc_intr_destroy(&server->intr);
     sc_cond_destroy(&server->cond_stopped);
     sc_mutex_destroy(&server->mutex);
 
-    sc_adb_destroy();
+    if (server->ssh) {
+        sc_ssh_target_destroy(&server->ssh_target);
+    } else {
+        sc_adb_destroy();
+    }
 }

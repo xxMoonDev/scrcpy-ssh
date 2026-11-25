@@ -292,6 +292,7 @@ struct scrcpy_options {
     enum sc_camera_facing camera_facing;
     struct sc_port_range port_range;
     uint32_t tunnel_host;
+    const char *ssh;
     uint16_t tunnel_port;
     uint8_t shortcut_mods; // OR of enum sc_shortcut_mod values
     uint8_t min_size_alignment;

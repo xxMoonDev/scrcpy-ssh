@@ -11,6 +11,32 @@
 
 #define CMD_MAX_LEN 8192
 
+// Return an inheritable duplicate of `h` (NULL if `h` is not usable)
+static HANDLE
+dup_inheritable(HANDLE h) {
+    if (!h || h == INVALID_HANDLE_VALUE) {
+        return NULL;
+    }
+    HANDLE dup;
+    if (!DuplicateHandle(GetCurrentProcess(), h, GetCurrentProcess(), &dup, 0,
+                         TRUE, DUPLICATE_SAME_ACCESS)) {
+        return NULL;
+    }
+    return dup;
+}
+
+// Open the NUL device as an inheritable handle
+static HANDLE
+open_nul(DWORD access) {
+    SECURITY_ATTRIBUTES sa;
+    sa.nLength = sizeof(sa);
+    sa.lpSecurityDescriptor = NULL;
+    sa.bInheritHandle = TRUE;
+    HANDLE h = CreateFileW(L"NUL", access, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           &sa, OPEN_EXISTING, 0, NULL);
+    return h == INVALID_HANDLE_VALUE ? NULL : h;
+}
+
 enum sc_process_result
 sc_process_execute_p(const char *const argv[], HANDLE *handle, unsigned flags,
                      HANDLE *pin, HANDLE *pout, HANDLE *perr) {
@@ -18,7 +44,7 @@ sc_process_execute_p(const char *const argv[], HANDLE *handle, unsigned flags,
     bool inherit_stderr = !perr && !(flags & SC_PROCESS_NO_STDERR);
 
     // Add 1 per non-NULL pointer
-    unsigned handle_count = !!pin || !!pout || !!perr;
+    unsigned handle_count = !!pin + !!pout + !!perr;
 
     enum sc_process_result ret = SC_PROCESS_ERROR_GENERIC;
 
@@ -66,6 +92,10 @@ sc_process_execute_p(const char *const argv[], HANDLE *handle, unsigned flags,
     memset(&si, 0, sizeof(si));
     si.StartupInfo.cb = sizeof(si);
     HANDLE handles[3];
+    // Handles created only for the child (closed after CreateProcessW())
+    HANDLE extra[3];
+    unsigned extra_count = 0;
+    unsigned list_count = 0;
 
     si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
     if (inherit_stdout) {
@@ -93,6 +123,36 @@ sc_process_execute_p(const char *const argv[], HANDLE *handle, unsigned flags,
             handles[i++] = si.StartupInfo.hStdError;
         }
 
+        if (!pin) {
+            HANDLE h = open_nul(GENERIC_READ);
+            if (h) {
+                si.StartupInfo.hStdInput = h;
+                handles[i++] = h;
+                extra[extra_count++] = h;
+            }
+        }
+        if (!pout) {
+            HANDLE h = inherit_stdout
+                     ? dup_inheritable(GetStdHandle(STD_OUTPUT_HANDLE))
+                     : open_nul(GENERIC_WRITE);
+            if (h) {
+                si.StartupInfo.hStdOutput = h;
+                handles[i++] = h;
+                extra[extra_count++] = h;
+            }
+        }
+        if (!perr) {
+            HANDLE h = inherit_stderr
+                     ? dup_inheritable(GetStdHandle(STD_ERROR_HANDLE))
+                     : open_nul(GENERIC_WRITE);
+            if (h) {
+                si.StartupInfo.hStdError = h;
+                handles[i++] = h;
+                extra[extra_count++] = h;
+            }
+        }
+        list_count = i;
+
         SIZE_T size;
         // Call it once to know the required buffer size
         BOOL ok =
@@ -116,7 +176,7 @@ sc_process_execute_p(const char *const argv[], HANDLE *handle, unsigned flags,
 
         ok = UpdateProcThreadAttribute(lpAttributeList, 0,
                                        PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-                                       handles, handle_count * sizeof(HANDLE),
+                                       handles, list_count * sizeof(HANDLE),
                                        NULL, NULL);
         if (!ok) {
             goto error_free_attribute_list;
@@ -151,6 +211,10 @@ sc_process_execute_p(const char *const argv[], HANDLE *handle, unsigned flags,
     BOOL ok = CreateProcessW(NULL, wide, NULL, NULL, bInheritHandles,
                              dwCreationFlags, NULL, NULL, &si.StartupInfo, &pi);
     free(wide);
+    for (unsigned k = 0; k < extra_count; ++k) {
+        CloseHandle(extra[k]);
+    }
+    extra_count = 0;
     if (!ok) {
         int err = GetLastError();
         LOGE("CreateProcessW() error %d", err);
@@ -183,6 +247,9 @@ sc_process_execute_p(const char *const argv[], HANDLE *handle, unsigned flags,
     return SC_PROCESS_SUCCESS;
 
 error_free_attribute_list:
+    for (unsigned k = 0; k < extra_count; ++k) {
+        CloseHandle(extra[k]);
+    }
     if (lpAttributeList) {
         DeleteProcThreadAttributeList(lpAttributeList);
         free(lpAttributeList);
@@ -239,6 +306,15 @@ sc_pipe_read(HANDLE pipe, char *data, size_t len) {
         return -1;
     }
     return r;
+}
+
+ssize_t
+sc_pipe_write(HANDLE pipe, const char *data, size_t len) {
+    DWORD w;
+    if (!WriteFile(pipe, data, len, &w, NULL)) {
+        return -1;
+    }
+    return w;
 }
 
 void

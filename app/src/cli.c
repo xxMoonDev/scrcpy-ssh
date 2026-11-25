@@ -47,6 +47,7 @@ enum {
     OPT_VIDEO_BUFFER,
     OPT_V4L2_BUFFER,
     OPT_TUNNEL_HOST,
+    OPT_SSH,
     OPT_TUNNEL_PORT,
     OPT_NO_CLIPBOARD_AUTOSYNC,
     OPT_TCPIP,
@@ -928,6 +929,16 @@ static const struct sc_option options[] = {
         .longopt = "time-limit",
         .argdesc = "seconds",
         .text = "Set the maximum mirroring time, in seconds.",
+    },
+    {
+        .longopt_id = OPT_SSH,
+        .longopt = "ssh",
+        .argdesc = "[user@]host[:port]",
+        .text = "Connect to the device over SSH instead of adb (scrcpy-ssh).\n"
+                "The SSH server on the device must run commands as root (or "
+                "as a user allowed to run app_process), and login must be "
+                "non-interactive (key or ssh-agent). The system 'ssh' client "
+                "is used (override with the SSH environment variable).",
     },
     {
         .longopt_id = OPT_TUNNEL_HOST,
@@ -2631,6 +2642,9 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
                     return false;
                 }
                 break;
+            case OPT_SSH:
+                opts->ssh = optarg;
+                break;
             case OPT_TUNNEL_HOST:
                 if (!parse_ip(optarg, &opts->tunnel_host)) {
                     return false;
@@ -3280,6 +3294,18 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
             && !opts->mouse_hover) {
         LOGE("--no-mouse-over is specific to --mouse=sdk");
         return false;
+    }
+
+    if (opts->ssh) {
+        if (opts->serial || opts->select_usb || opts->select_tcpip
+                || opts->tcpip) {
+            LOGE("--ssh is incompatible with -s/-d/-e/--tcpip");
+            return false;
+        }
+        if (opts->tunnel_host || opts->tunnel_port) {
+            LOGE("--ssh is incompatible with --tunnel-host/--tunnel-port");
+            return false;
+        }
     }
 
     if ((opts->tunnel_host || opts->tunnel_port) && !opts->force_adb_forward) {
