@@ -3,7 +3,7 @@
 This repository is a modified version of [scrcpy](https://github.com/Genymobile/scrcpy)
 (Copyright (C) 2018 Genymobile, Copyright (C) 2018-2026 Romain Vimont, Apache License 2.0).
 As the Apache License 2.0 requires, the files changed for **scrcpy-ssh** are listed here.
-The changes are Copyright 2026 <YOUR NAME>, under the same Apache License 2.0.
+The changes are Copyright 2026 xxMoonDev, under the same Apache License 2.0.
 
 ## New files
 | File | Purpose |

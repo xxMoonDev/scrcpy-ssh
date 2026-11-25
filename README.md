@@ -1,12 +1,12 @@
 > **This is scrcpy-ssh**, a fork of [scrcpy](https://github.com/Genymobile/scrcpy) v5.0.1 that adds an
-> **SSH transport**: `scrcpy --ssh [user@]host[:port]` mirrors and controls a rooted device through its SSH
-> server (for example [AndroOpenHeart](https://github.com/<your-github-user>/AndroOpenHeart)) instead of adb.
+> **SSH transport**: `scrcpy --ssh [user@]host[:port]` mirrors and controls an Android device through its SSH
+> server (for example [AndroOpenHeart](https://github.com/xxMoonDev/AndroOpenHeart)) instead of adb.
 > It works over Wi-Fi, a VPN or a USB port forward, without ADB enabled. It's used by
-> [AndroUnderTheHood](https://github.com/<your-github-user>/AndroUnderTheHood) for screen mirroring.
+> [AndroUnderTheHood](https://github.com/xxMoonDev/AndroUnderTheHood) for screen mirroring.
 >
 > - How it works, requirements and options: **[doc/ssh.md](doc/ssh.md)**
 > - Files changed from upstream: **[SSH_FORK_CHANGES.md](SSH_FORK_CHANGES.md)**
-> - Windows build: see the [Releases](https://github.com/<your-github-user>/scrcpy-ssh/releases) page.
+> - Windows build: see the [Releases](https://github.com/xxMoonDev/scrcpy-ssh/releases) page.
 >
 > All credit for scrcpy goes to **Romain Vimont** and **Genymobile**. Please report SSH-transport problems
 > here, not upstream. The rest of this README is the upstream scrcpy README.

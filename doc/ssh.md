@@ -14,7 +14,7 @@ Everything else (video, audio, control, clipboard, file drop, recording, all opt
 ## Requirements
 - **On the phone:** an SSH server whose sessions can run `app_process` and write `/data/local/tmp`. In
   practice that's a root or ADB-shell-user session:
-  - [AndroOpenHeart](https://github.com/<your-github-user>/AndroOpenHeart): root through `su`, or the shell user
+  - [AndroOpenHeart](https://github.com/xxMoonDev/AndroOpenHeart): root through `su`, or the shell user
     through Shizuku.
   - Any other server that runs commands as root (Magisk SSH modules, etc.).
   - A user-level server such as Termux `sshd` won't work. It can't start the scrcpy server.
